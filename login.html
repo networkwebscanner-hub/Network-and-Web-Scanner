@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network & Web Scanner - Terminal Login</title>
+    <!-- Outfit & Inter Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+        rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <video autoplay muted loop playsinline id="bg-video">
+        <source src="bg.mp4" type="video/mp4">
+    </video>
+
+    <div class="auth-wrapper">
+        <div class="auth-card bg-glass animate-fade-in">
+
+            <div class="auth-header">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-lock"></i>
+                </div>
+                <h2>Scanner Login</h2>
+                <p>Provide security credentials to unlock dashboard console</p>
+            </div>
+
+            <form id="form-login">
+                <div class="form-group">
+                    <label for="login-input">Username or Email</label>
+                    <input type="text" id="login-input" placeholder="name@company.com or User Code" required>
+                </div>
+                <div class="form-group">
+                    <label for="login-pass">Password</label>
+                    <input type="password" id="login-pass" placeholder="••••••••" required>
+                </div>
+                <div class="form-group">
+                    <label for="login-code">6-Digit User Code</label>
+                    <input type="text" id="login-code" maxlength="6" pattern="[0-9]{6}" placeholder="123456" required
+                        autocomplete="off">
+                </div>
+                <button type="submit" id="btn-login-submit" class="btn btn-primary btn-large"
+                    style="width: 100%; margin-top: 10px;">
+                    <span>Access Dashboard</span>
+                </button>
+            </form>
+
+            <div class="form-footer" style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
+                <a href="forgot.html" class="forgot-link" style="color: var(--primary); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.2s;">Forgot Password or User Code?</a>
+                <span style="color: var(--text-secondary); font-size: 13px;">Need an account? <a href="register.html" style="color: #fff; font-weight: 600;">Register Profile</a></span>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Scripts configuration -->
+    <script src="main.js"></script>
+    <script>
+        // Redirect if already authenticated
+        redirectIfAuthenticated();
+
+        const formLogin = document.getElementById("form-login");
+        const loginSubmitBtn = document.getElementById("btn-login-submit");
+
+        formLogin.addEventListener("submit", async (e) => {
+            e.preventDefault();
+
+            const loginInput = document.getElementById("login-input").value.trim();
+            const password = document.getElementById("login-pass").value;
+            const userCode = document.getElementById("login-code").value.trim();
+
+            if (!loginInput || !password || !userCode) {
+                showToast("All fields are required to authenticate.", "error");
+                return;
+            }
+
+            loginSubmitBtn.disabled = true;
+            loginSubmitBtn.innerHTML = `<span class="spinner"></span> &nbsp; Authenticating...`;
+
+            const result = await callBackend({
+                action: "loginUser",
+                loginInput: loginInput,
+                password: password,
+                userCode: userCode
+            });
+
+            loginSubmitBtn.disabled = false;
+            loginSubmitBtn.innerHTML = `<span>Access Dashboard</span>`;
+
+            if (result.success) {
+                // Save user session to localStorage
+                localStorage.setItem("user_session", JSON.stringify({
+                    name: result.name,
+                    email: result.email,
+                    userCode: result.userCode
+                }));
+
+                // Redirect to dashboard with query param trigger
+                window.location.href = "./templates/dashboard.html?login=success";
+            } else {
+                showToast(result.error || "Authentication failed. Check your security entries.", "error");
+            }
+        });
+    </script>
+</body>
+
+</html>
