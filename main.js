@@ -145,26 +145,15 @@ function initLiveClock() {
 
 // Helper to get relative path based on environment and current page location
 function getRelativePath(target) {
-    const isFileProtocol = window.location.protocol === 'file:';
     const path = window.location.pathname;
     const isInsideTemplates = path.includes('/templates/') || path.endsWith('/templates');
     
     if (target === 'login') {
-        if (isFileProtocol) {
-            return isInsideTemplates ? "../login.html" : "login.html";
-        } else {
-            // Flask server
-            return "/login.html";
-        }
+        return isInsideTemplates ? "../login.html" : "login.html";
     }
     
-    if (target === 'dashboard') {
-        if (isFileProtocol) {
-            return isInsideTemplates ? "dashboard.html" : "templates/dashboard.html";
-        } else {
-            // Flask server: main route is "/"
-            return "/";
-        }
+    if (target === 'dashboard') {A
+        return isInsideTemplates ? "dashboard.html" : "templates/dashboard.html";
     }
     
     return target;
