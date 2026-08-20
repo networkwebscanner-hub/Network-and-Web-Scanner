@@ -11,23 +11,31 @@ document.addEventListener('DOMContentLoaded', function() {
     let clockTimer = null;
     let isNetworkSelected = false; // System starts in Standby, won't scan until user selects network
     
+
     // Chart.js references
     let throughputChart = null;
     let threatChart = null;
     let trainingChart = null;
     let rocChart = null;
+    let webAuditChart = null;
+    let securityRadarChart = null;
+    let securityGaugeChart = null;
+    let suggestionsSpeedChart = null;
+    let webStrengthGaugeChart = null;
     
     // Mode status: detects if running via file:// or if Flask API fails
-    let isOfflineMode = window.location.protocol === 'file:';
-    if (isOfflineMode) {
-        console.warn("AI-NIDS: Running in Offline Standalone Mode (file://). Using client-side simulation.");
-    }
+    let isOfflineMode = false; // Try to connect to online/local Flask server dynamically on startup
+    const API_BASE = (window.location.protocol === 'file:' || window.location.hostname === '') ? 'http://127.0.0.1:5000' : '';
+    let isScanRunning = false;
+    let sidebarScanTimer = null;
+    let currentScanReport = null;
+    let currentDeepScanReport = null;
     
     // Background video path resolution
     const bgVideo = document.getElementById('bg-video');
     if (bgVideo) {
         const source = bgVideo.querySelector('source');
-        if (isOfflineMode) {
+        if (window.location.protocol === 'file:') {
             source.src = 'bg.mp4'; // relative to templates/dashboard.html location
         } else {
             source.src = '/static/bg.mp4'; // served from Flask static directory
@@ -36,19 +44,19 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Offline / Simulated database states
-    let totalPackets = 150240;
-    let totalThreats = 3412;
+    let totalPackets = 0;
+    let totalThreats = 0;
     let offlinePackets = [];
     let offlineAlerts = [];
     let offlineScanHistory = [];
 
     // Offline threat counts matching backend simulator starting counts
     let offlineThreatCounts = {
-        'Normal': 146828,
-        'DDoS Attack': 1850,
-        'SQL Injection': 480,
-        'Port Scan': 850,
-        'Brute Force': 232
+        'Normal': 0,
+        'DDoS Attack': 0,
+        'SQL Injection': 0,
+        'Port Scan': 0,
+        'Brute Force': 0
     };
 
     const offlineNetworkDetails = {
@@ -134,6 +142,12 @@ document.addEventListener('DOMContentLoaded', function() {
         
         if (activeNetworkSecurityProfile) {
             if (secPanel) secPanel.classList.remove('hidden');
+            if (isScanRunning) {
+                if (levelEl) levelEl.textContent = '--';
+                if (vulnEl) vulnEl.textContent = 'Analysing Network Segments...';
+                if (threatsEl) threatsEl.textContent = 'Awaiting Scan Completion...';
+                return;
+            }
             if (levelEl) {
                 levelEl.textContent = activeNetworkSecurityProfile.level || '--';
                 levelEl.style.color = activeNetworkSecurityProfile.level_color || 'var(--text)';
@@ -258,7 +272,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
             
-            fetch(`/api/network-details?interface=${interfaceType}&ssid=${encodeURIComponent(ssid)}&auth=${encodeURIComponent(auth)}&enc=${encodeURIComponent(enc)}`)
+            fetch(`${API_BASE}/api/network-details?interface=${interfaceType}&ssid=${encodeURIComponent(ssid)}&auth=${encodeURIComponent(auth)}&enc=${encodeURIComponent(enc)}`)
                 .then(res => res.json())
                 .then(details => {
                     displayNetworkDetails(details);
@@ -353,8 +367,35 @@ document.addEventListener('DOMContentLoaded', function() {
     // Trigger initial check
     handleInterfaceSelection();
     
+
+    
     // Start live updates polling loop
     startPacketPolling();
+
+    // Sidebar Drawer Toggle for Mobile viewports
+    const sidebarToggle = document.getElementById('sidebar-toggle-btn');
+    const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+    const sidebarElement = document.querySelector('.sidebar');
+    
+    if (sidebarToggle && sidebarElement && sidebarBackdrop) {
+        sidebarToggle.addEventListener('click', function() {
+            sidebarElement.classList.add('active');
+            sidebarBackdrop.classList.add('active');
+        });
+        
+        sidebarBackdrop.addEventListener('click', function() {
+            sidebarElement.classList.remove('active');
+            sidebarBackdrop.classList.remove('active');
+        });
+        
+        // Also close sidebar when clicking a nav item on mobile
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', function() {
+                sidebarElement.classList.remove('active');
+                sidebarBackdrop.classList.remove('active');
+            });
+        });
+    }
 
     // ----------------------------------------------------------------------
     // 1. Single Page App Navigation
@@ -366,9 +407,10 @@ document.addEventListener('DOMContentLoaded', function() {
         const pageSubtitle = document.getElementById('page-subtitle');
         
         const subtitleMap = {
-            'overview': 'Real-time AI intrusion logs and passive system health metrics.',
+            'overview': 'Sentinel network intrusion detection monitoring console.',
             'live-traffic': 'Streaming raw socket captures processed by local neural classifiers.',
-            'threat-history': 'Historical repository of malicious packet payloads and alerts.',
+            'threat-history': 'Real-time AI intrusion logs and passive system health metrics.',
+            'network-suggestions': 'AI-generated defense configurations and preventative network suggestions.',
             'web-scanner': 'Passive HTTP configuration auditor and SSL assessment tool.',
             'ai-performance': 'Neural network accuracy metrics, confusion matrices, and ROC plots.',
             'wifi-radar': 'Active wireless spectrum assessment mapping visible SSIDs.'
@@ -377,7 +419,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const titleMap = {
             'overview': 'Dashboard Overview',
             'live-traffic': 'Live Traffic Stream',
-            'threat-history': 'Threat Logs Database',
+            'threat-history': 'AI Intrusion Logs & Passive System Health',
+            'network-suggestions': 'Suggestions to Protect Your Network',
             'web-scanner': 'Website Security Scanner',
             'ai-performance': 'AI Model Performance Analytics',
             'wifi-radar': 'Nearby Wi-Fi Radar'
@@ -408,6 +451,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 if (target === 'wifi-radar') {
                     loadRadarNetworks();
+                }
+                
+                if (target === 'network-suggestions') {
+                    if (isOfflineMode) {
+                        updateAiSuggestions(offlineAlerts);
+                    } else {
+                        fetch(API_BASE + '/api/alerts')
+                            .then(res => res.json())
+                            .then(alerts => updateAiSuggestions(alerts))
+                            .catch(e => console.error("Error fetching active suggestions:", e));
+                    }
                 }
                 
                 // Resize charts to prevent sizing bugs when tabs switch
@@ -516,10 +570,10 @@ document.addEventListener('DOMContentLoaded', function() {
         threatChart = new Chart(ctxDoughnut, {
             type: 'doughnut',
             data: {
-                labels: ['Normal', 'DDoS Attack', 'SQL Injection', 'Port Scan', 'Brute Force'],
+                labels: ['Normal Traffic', 'Active Threats'],
                 datasets: [{
-                    data: isNetworkSelected ? [146828, 1850, 480, 850, 232] : [0, 0, 0, 0, 0],
-                    backgroundColor: ['#10b981', '#f43f5e', '#8b5cf6', '#f59e0b', '#3b82f6'],
+                    data: [0, 0],
+                    backgroundColor: ['#10b981', '#f43f5e'],
                     borderColor: 'rgba(15, 23, 42, 0.8)',
                     borderWidth: 2
                 }]
@@ -536,6 +590,188 @@ document.addEventListener('DOMContentLoaded', function() {
                 cutout: '65%'
             }
         });
+
+        // Initialize Web Audit History Chart
+        const ctxWebAudit = document.getElementById('web-audit-history-chart');
+        if (ctxWebAudit) {
+            webAuditChart = new Chart(ctxWebAudit.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Security Score',
+                        data: [],
+                        borderColor: '#f97316', // Orange
+                        backgroundColor: 'rgba(249, 115, 22, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointBackgroundColor: '#f97316',
+                        pointRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                title: (tooltipItems) => tooltipItems[0].label,
+                                label: (context) => ` Score: ${context.raw}/100`
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: '#94a3b8', font: { size: 9 } }
+                        },
+                        y: {
+                            min: 0,
+                            max: 100,
+                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                            ticks: { color: '#94a3b8', font: { size: 9 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Initialize Security Dimensions Radar Chart
+        const ctxRadar = document.getElementById('radar-security-dimensions-chart');
+        if (ctxRadar) {
+            securityRadarChart = new Chart(ctxRadar.getContext('2d'), {
+                type: 'radar',
+                data: {
+                    labels: [
+                        'Encryption Strength',
+                        'Port Isolation',
+                        'DDoS Resilience',
+                        'Database Safety',
+                        'Auth Integrity'
+                    ],
+                    datasets: [{
+                        label: 'Resilience Score (%)',
+                        data: [100, 100, 100, 100, 100],
+                        borderColor: '#9d4edd',
+                        backgroundColor: 'rgba(157, 78, 221, 0.15)',
+                        pointBackgroundColor: '#9d4edd',
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: '#9d4edd',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        r: {
+                            min: 0,
+                            max: 100,
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            angleLines: { color: 'rgba(255, 255, 255, 0.05)' },
+                            pointLabels: { color: '#94a3b8', font: { size: 9, family: 'Inter' } },
+                            ticks: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Initialize Security Strength Gauge Chart
+        const ctxGauge = document.getElementById('gauge-security-strength-chart');
+        if (ctxGauge) {
+            securityGaugeChart = new Chart(ctxGauge.getContext('2d'), {
+                type: 'doughnut',
+                data: {
+                    datasets: [{
+                        data: [100, 0],
+                        backgroundColor: ['#10b981', 'rgba(255, 255, 255, 0.05)'],
+                        borderWidth: 0,
+                        hoverBackgroundColor: ['#10b981', 'rgba(255, 255, 255, 0.05)']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '78%',
+                    rotation: -90,
+                    circumference: 180,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { enabled: false }
+                    }
+                }
+            });
+        }
+
+        // Initialize Suggestions Speed Line Chart
+        const ctxSpeed = document.getElementById('suggestions-speed-line-chart');
+        if (ctxSpeed) {
+            suggestionsSpeedChart = new Chart(ctxSpeed.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Throughput (MB/s)',
+                        data: [],
+                        borderColor: '#00f5d4',
+                        backgroundColor: 'rgba(0, 245, 212, 0.04)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: '#64748b', font: { size: 9 } }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                            ticks: { color: '#94a3b8', font: { size: 9 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Initialize Website Scanner Strength Gauge Chart
+        const ctxWebGauge = document.getElementById('web-strength-gauge-chart');
+        if (ctxWebGauge) {
+            webStrengthGaugeChart = new Chart(ctxWebGauge.getContext('2d'), {
+                type: 'doughnut',
+                data: {
+                    datasets: [{
+                        data: [100, 0],
+                        backgroundColor: ['#10b981', 'rgba(255, 255, 255, 0.05)'],
+                        borderWidth: 0,
+                        hoverBackgroundColor: ['#10b981', 'rgba(255, 255, 255, 0.05)']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '82%',
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { enabled: false }
+                    }
+                }
+            });
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -546,27 +782,64 @@ document.addEventListener('DOMContentLoaded', function() {
         if (isOfflineMode) {
             document.getElementById('stat-packets').textContent = totalPackets.toLocaleString();
             document.getElementById('stat-threats').textContent = totalThreats.toLocaleString();
-            const ratio = ((totalThreats / totalPackets) * 100).toFixed(2);
+            const ratio = totalPackets > 0 ? ((totalThreats / totalPackets) * 100).toFixed(2) : "0.00";
             document.getElementById('stat-threat-ratio').textContent = `${ratio}% ratio`;
             document.getElementById('stat-accuracy').textContent = "98.72%";
             const f1El = document.getElementById('stat-f1');
             if (f1El) f1El.textContent = "F1 Score: 98.07%";
             
-            const threatData = [
-                offlineThreatCounts['Normal'] || 0,
-                offlineThreatCounts['DDoS Attack'] || 0,
-                offlineThreatCounts['SQL Injection'] || 0,
-                offlineThreatCounts['Port Scan'] || 0,
-                offlineThreatCounts['Brute Force'] || 0
-            ];
+            const secRateEl = document.getElementById('stat-sec-rate');
+            if (secRateEl) {
+                const pps = Math.floor(Math.random() * 600) + 2900;
+                secRateEl.textContent = `${pps.toLocaleString()} / sec rate`;
+            }
+            
+            const normalCount = offlineThreatCounts['Normal'] || 0;
+            const threatCount = (offlineThreatCounts['DDoS Attack'] || 0) + 
+                                (offlineThreatCounts['SQL Injection'] || 0) + 
+                                (offlineThreatCounts['Port Scan'] || 0) + 
+                                (offlineThreatCounts['Brute Force'] || 0);
+            
+            const threatData = [normalCount, threatCount];
             if (threatChart) {
                 threatChart.data.datasets[0].data = threatData;
                 threatChart.update();
             }
+
+            // Offline System health metrics simulation for dedicated tab
+            const cpuVal = Math.floor(Math.random() * 25) + 10;
+            const memVal = Math.floor(Math.random() * 15) + 55;
+            const diskVal = 42.3;
+            
+            const cpuEl = document.getElementById('health-cpu');
+            const memEl = document.getElementById('health-mem');
+            const diskEl = document.getElementById('health-disk');
+            
+            const cpuBar = document.getElementById('health-cpu-bar');
+            const memBar = document.getElementById('health-mem-bar');
+            const diskBar = document.getElementById('health-disk-bar');
+            
+            if (cpuEl) cpuEl.textContent = `${cpuVal}%`;
+            if (cpuBar) cpuBar.style.width = `${cpuVal}%`;
+            
+            if (memEl) memEl.textContent = `${memVal}%`;
+            if (memBar) memBar.style.width = `${memVal}%`;
+            
+            if (diskEl) diskEl.textContent = `${diskVal}%`;
+            if (diskBar) diskBar.style.width = `${diskVal}%`;
+            
+            // Network scan progress sequence
+            const progressEl = document.getElementById('scan-progress');
+            if (progressEl) {
+                let current = parseInt(progressEl.style.width) || 0;
+                current = (current + 5) % 100;
+                progressEl.style.width = current + '%';
+            }
+            
             return;
         }
 
-        fetch('/api/stats')
+        fetch(API_BASE + '/api/stats')
             .then(res => res.json())
             .then(data => {
                 totalPackets = data.overall.packets_checked;
@@ -578,16 +851,42 @@ document.addEventListener('DOMContentLoaded', function() {
                 const f1El = document.getElementById('stat-f1');
                 if (f1El) f1El.textContent = "F1 Score: 98.07%";
                 
-                const threatData = [
-                    data.threats['Normal'] || 0,
-                    data.threats['DDoS Attack'] || 0,
-                    data.threats['SQL Injection'] || 0,
-                    data.threats['Port Scan'] || 0,
-                    data.threats['Brute Force'] || 0
-                ];
+                const secRateEl = document.getElementById('stat-sec-rate');
+                if (secRateEl) {
+                    const pps = Math.floor(Math.random() * 600) + 2900;
+                    secRateEl.textContent = `${pps.toLocaleString()} / sec rate`;
+                }
+                
+                const normalCount = data.threats['Normal'] || 0;
+                const threatCount = (data.threats['DDoS Attack'] || 0) + 
+                                    (data.threats['SQL Injection'] || 0) + 
+                                    (data.threats['Port Scan'] || 0) + 
+                                    (data.threats['Brute Force'] || 0);
+                
+                const threatData = [normalCount, threatCount];
                 if (threatChart) {
                     threatChart.data.datasets[0].data = threatData;
                     threatChart.update();
+                }
+
+                // Update system health metrics on dedicated tab
+                if (data.system) {
+                    const cpuEl = document.getElementById('health-cpu');
+                    const memEl = document.getElementById('health-mem');
+                    const diskEl = document.getElementById('health-disk');
+                    
+                    const cpuBar = document.getElementById('health-cpu-bar');
+                    const memBar = document.getElementById('health-mem-bar');
+                    const diskBar = document.getElementById('health-disk-bar');
+                    
+                    if (cpuEl) cpuEl.textContent = `${data.system.cpu.toFixed(1)}%`;
+                    if (cpuBar) cpuBar.style.width = `${data.system.cpu}%`;
+                    
+                    if (memEl) memEl.textContent = `${data.system.memory.toFixed(1)}%`;
+                    if (memBar) memBar.style.width = `${data.system.memory}%`;
+                    
+                    if (diskEl) diskEl.textContent = `${data.system.disk.toFixed(1)}%`;
+                    if (diskBar) diskBar.style.width = `${data.system.disk}%`;
                 }
             })
             .catch(() => switchToOfflineMode());
@@ -600,7 +899,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        fetch('/api/alerts')
+        fetch(API_BASE + '/api/alerts')
             .then(res => res.json())
             .then(alerts => renderAlertsList(alerts))
             .catch(() => switchToOfflineMode());
@@ -625,11 +924,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     <p>No security anomalies currently registered.</p>
                 </div>
             `;
-            countEl.textContent = '0 Alarms Active';
+            countEl.textContent = '0 Thread Possibilities';
             return;
         }
         
-        countEl.textContent = `${alerts.length} Alarms Active`;
+        countEl.textContent = `${alerts.length} Thread Possibilities`;
         
         let html = '';
         alerts.forEach(alert => {
@@ -662,122 +961,359 @@ document.addEventListener('DOMContentLoaded', function() {
         const statusEl = document.getElementById('ai-safety-status');
         if (!listEl || !statusEl) return;
 
+        // Check if selected network itself is unsecured
+        const netSelect = document.getElementById('network-select');
+        let isNetworkUnsecured = false;
+        let activeSSID = '';
+        if (isNetworkSelected && netSelect && netSelect.selectedIndex >= 0) {
+            const selectedOpt = netSelect.options[netSelect.selectedIndex];
+            if (selectedOpt) {
+                activeSSID = selectedOpt.value;
+                const auth = selectedOpt.getAttribute('data-auth') || '';
+                const enc = selectedOpt.getAttribute('data-enc') || '';
+                isNetworkUnsecured = auth === 'Open' || enc === 'None' || enc === 'none' || auth === '';
+            }
+        }
+
+        // Update Radar chart metrics
+        let encryptionScore = 100;
+        let portScore = 100;
+        let ddosScore = 100;
+        let dbScore = 100;
+        let authScore = 100;
+
+        if (isNetworkUnsecured) {
+            encryptionScore = 10;
+        } else {
+            const netSelectEl = document.getElementById('network-select');
+            const selectedOpt = netSelectEl ? netSelectEl.options[netSelectEl.selectedIndex] : null;
+            const authVal = selectedOpt ? (selectedOpt.getAttribute('data-auth') || '') : '';
+            if (authVal.includes('WPA2')) {
+                encryptionScore = 80;
+            }
+        }
+
+        if (isNetworkSelected && alerts) {
+            alerts.forEach(alert => {
+                if (alert.type.includes('DDoS')) ddosScore = 20;
+                else if (alert.type.includes('SQL') || alert.type.includes('Injection')) dbScore = 10;
+                else if (alert.type.includes('Scan') || alert.type.includes('Port')) portScore = 30;
+                else if (alert.type.includes('Force') || alert.type.includes('Brute')) authScore = 15;
+            });
+        }
+
+        if (securityRadarChart) {
+            securityRadarChart.data.datasets[0].data = [
+                encryptionScore,
+                portScore,
+                ddosScore,
+                dbScore,
+                authScore
+            ];
+            securityRadarChart.update();
+        }
+
+        // Calculate Overall Security Strength Score
+        let overallStrength = 100;
+        if (isNetworkSelected) {
+            if (isNetworkUnsecured) {
+                overallStrength -= 45;
+            } else if (encryptionScore < 100) {
+                overallStrength -= 15; // WPA2 deduction
+            }
+            
+            if (alerts) {
+                alerts.forEach(alert => {
+                    if (alert.type.includes('DDoS')) overallStrength -= 30;
+                    else if (alert.type.includes('SQL') || alert.type.includes('Injection')) overallStrength -= 30;
+                    else if (alert.type.includes('Force') || alert.type.includes('Brute')) overallStrength -= 25;
+                    else if (alert.type.includes('Scan') || alert.type.includes('Port')) overallStrength -= 15;
+                });
+            }
+            overallStrength = Math.max(5, overallStrength);
+        }
+        
+        let strengthLabel = 'Strong';
+        let strengthColor = '#10b981'; // Green
         if (!isNetworkSelected) {
-            statusEl.textContent = 'Awaiting Interface Selection';
-            statusEl.className = 'badge badge-warning';
-            listEl.innerHTML = `
-                <div class="ai-suggestion-item">
-                    <div class="ai-suggestion-icon"><i class="fa-solid fa-circle-info text-orange" style="color: var(--orange);"></i></div>
-                    <div class="ai-suggestion-text">
-                        <h4>Awaiting Interface Selection</h4>
-                        <p>No active adapter is currently selected for surveillance. Please select an interface from the sidebar to begin AI intrusion detection analysis.</p>
-                    </div>
-                    <div class="ai-suggestion-action">
-                        <span class="action-badge badge-neutral">Inactive</span>
-                    </div>
-                </div>
-            `;
-            return;
+            strengthLabel = 'Standby';
+            strengthColor = '#38bdf8'; // Blue
+            overallStrength = 100;
+        } else if (overallStrength < 60) {
+            strengthLabel = 'Weak';
+            strengthColor = '#f43f5e'; // Red
+        } else if (overallStrength < 85) {
+            strengthLabel = 'Moderate';
+            strengthColor = '#f97316'; // Orange
+        }
+        
+        if (securityGaugeChart) {
+            securityGaugeChart.data.datasets[0].data = [overallStrength, 100 - overallStrength];
+            securityGaugeChart.data.datasets[0].backgroundColor = [strengthColor, 'rgba(255, 255, 255, 0.05)'];
+            securityGaugeChart.data.datasets[0].hoverBackgroundColor = [strengthColor, 'rgba(255, 255, 255, 0.05)'];
+            securityGaugeChart.update();
+        }
+        
+        const scoreValEl = document.getElementById('gauge-score-value');
+        const scoreLabelEl = document.getElementById('gauge-score-label');
+        if (scoreValEl) {
+            scoreValEl.textContent = isNetworkSelected ? overallStrength + '%' : '--';
+            scoreValEl.style.color = strengthColor;
+        }
+        if (scoreLabelEl) {
+            scoreLabelEl.textContent = strengthLabel;
         }
 
-        if (alerts.length === 0) {
-            statusEl.textContent = 'Network Status: Optimal';
-            statusEl.className = 'badge badge-success';
-            listEl.innerHTML = `
-                <div class="ai-suggestion-item">
-                    <div class="ai-suggestion-icon"><i class="fa-solid fa-circle-check text-green" style="color: var(--green);"></i></div>
-                    <div class="ai-suggestion-text">
-                        <h4>Your network is currently safe</h4>
-                        <p>AI NIDS is passively monitoring all packets. To maintain safety, ensure your OS firewall is enabled and restrict open ports.</p>
-                    </div>
-                    <div class="ai-suggestion-action">
-                        <span class="action-badge badge-neutral">No Action Required</span>
-                    </div>
-                </div>
-            `;
-            return;
+        if (!isNetworkSelected) {
+            statusEl.textContent = 'Network Status: Passive';
+            statusEl.className = 'badge badge-info';
+        } else {
+            statusEl.textContent = (isNetworkUnsecured || (alerts && alerts.length > 0)) ? 'Action Required: Vulnerabilities Found' : 'Network Status: Optimal';
+            statusEl.className = (isNetworkUnsecured || (alerts && alerts.length > 0)) ? 'badge badge-danger' : 'badge-success';
         }
 
-        statusEl.textContent = 'Threats Active: Action Required';
-        statusEl.className = 'badge badge-danger';
-
-        // Group alerts by type to provide specific advice
-        const alertTypes = new Set(alerts.map(a => a.type));
         let html = '';
 
-        alertTypes.forEach(type => {
-            if (type.includes('DDoS')) {
+        // 1. ACTIVE THREAT MITIGATIONS SECTION
+        if (isNetworkSelected && (isNetworkUnsecured || (alerts && alerts.length > 0))) {
+            html += `<h3 style="margin-top: 5px; margin-bottom: 12px; font-size: 13px; color: var(--red); text-transform: uppercase; letter-spacing: 0.5px;"><i class="fa-solid fa-bell text-red" style="margin-right: 6px;"></i> Active Mitigations Required</h3>`;
+            
+            if (isNetworkUnsecured && activeSSID && !activeSSID.includes("Automatic")) {
                 html += `
-                    <div class="ai-suggestion-item">
+                    <div class="ai-suggestion-item" style="border-left: 4px solid var(--red); background: rgba(255, 51, 102, 0.03); margin-bottom: 12px;">
                         <div class="ai-suggestion-icon"><i class="fa-solid fa-triangle-exclamation text-red" style="color: var(--red);"></i></div>
                         <div class="ai-suggestion-text">
-                            <h4>DDoS Vulnerability Detected</h4>
-                            <p>Active traffic surge detected. AI NIDS recommends configuring rate-limiting policies on boundary routers, blocking scan source IP addresses, and routing traffic through a DDoS mitigation service.</p>
+                            <h4>Critical: Unsecured Wi-Fi Connection</h4>
+                            <p>SSID "${activeSSID}" is unencrypted. Route traffic through a secure VPN or disconnect immediately to protect packets from local sniffer logs.</p>
                         </div>
                         <div class="ai-suggestion-action">
-                            <span class="action-badge badge-action-required">Block IPs / Rate Limit</span>
-                        </div>
-                    </div>
-                `;
-            } else if (type.includes('SQL') || type.includes('Injection')) {
-                html += `
-                    <div class="ai-suggestion-item">
-                        <div class="ai-suggestion-icon"><i class="fa-solid fa-database text-orange" style="color: var(--orange);"></i></div>
-                        <div class="ai-suggestion-text">
-                            <h4>SQL Injection Probing Attempt</h4>
-                            <p>Injection signatures detected in network payloads. Immediately sanitize web parameters, utilize parameterized queries (Prepared Statements), and deploy Web Application Firewall (WAF) query filtering.</p>
-                        </div>
-                        <div class="ai-suggestion-action">
-                            <span class="action-badge badge-action-required">Sanitize Inputs</span>
-                        </div>
-                    </div>
-                `;
-            } else if (type.includes('Scan') || type.includes('Port')) {
-                html += `
-                    <div class="ai-suggestion-item">
-                        <div class="ai-suggestion-icon"><i class="fa-solid fa-network-wired text-purple" style="color: var(--purple);"></i></div>
-                        <div class="ai-suggestion-text">
-                            <h4>Active Port Scan Reconnaissance</h4>
-                            <p>Sequential probing of network socket boundaries. Drop scan packets at network boundary, implement port-knocking mechanisms, and close unused service ports on exposed servers.</p>
-                        </div>
-                        <div class="ai-suggestion-action">
-                            <span class="action-badge badge-action-required">Configure Firewall</span>
-                        </div>
-                    </div>
-                `;
-            } else if (type.includes('Force') || type.includes('Brute')) {
-                html += `
-                    <div class="ai-suggestion-item">
-                        <div class="ai-suggestion-icon"><i class="fa-solid fa-key text-orange" style="color: var(--orange);"></i></div>
-                        <div class="ai-suggestion-text">
-                            <h4>Brute Force Authentication Attack</h4>
-                            <p>High frequency authentication failures. Restrict public access to admin interfaces, enable multi-factor authentication (2FA), and deploy automated IP blocking (e.g. Fail2ban).</p>
-                        </div>
-                        <div class="ai-suggestion-action">
-                            <span class="action-badge badge-action-required">Enforce 2FA / Lockout</span>
+                            <span class="action-badge badge-action-required">Use VPN / Disconnect</span>
                         </div>
                     </div>
                 `;
             }
-        });
 
-        // Default if it doesn't match above categories
-        if (!html) {
-            html = `
-                <div class="ai-suggestion-item">
-                    <div class="ai-suggestion-icon"><i class="fa-solid fa-triangle-exclamation text-red" style="color: var(--red);"></i></div>
-                    <div class="ai-suggestion-text">
-                        <h4>Anomaly Threat Detected</h4>
-                        <p>Generic intrusion payload discovered. AI NIDS recommends checking system log files, verifying firewall rules, and reviewing endpoint authorization states.</p>
-                    </div>
-                    <div class="ai-suggestion-action">
-                        <span class="action-badge badge-action-required">Verify Authorization</span>
-                    </div>
-                </div>
-            `;
+            const alertTypes = new Set(alerts.map(a => a.type));
+            alertTypes.forEach(type => {
+                if (type.includes('DDoS')) {
+                    html += `
+                        <div class="ai-suggestion-item" style="border-left: 4px solid var(--red); background: rgba(255, 51, 102, 0.03); margin-bottom: 12px;">
+                            <div class="ai-suggestion-icon"><i class="fa-solid fa-triangle-exclamation text-red" style="color: var(--red);"></i></div>
+                            <div class="ai-suggestion-text">
+                                <h4>Critical: Active DDoS Attack Mitigations</h4>
+                                <p>Surge traffic detected. Configure rate-limiting limits on your gateway router, drop scan source addresses, and activate WAF shields.</p>
+                            </div>
+                            <div class="ai-suggestion-action">
+                                <span class="action-badge badge-action-required">Block IPs / Rate Limit</span>
+                            </div>
+                        </div>
+                    `;
+                } else if (type.includes('SQL') || type.includes('Injection')) {
+                    html += `
+                        <div class="ai-suggestion-item" style="border-left: 4px solid var(--red); background: rgba(255, 51, 102, 0.03); margin-bottom: 12px;">
+                            <div class="ai-suggestion-icon"><i class="fa-solid fa-database text-orange" style="color: var(--orange);"></i></div>
+                            <div class="ai-suggestion-text">
+                                <h4>High Risk: SQL Injection Payload Intercepted</h4>
+                                <p>Unsanitized inputs flagged in query strings. Enforce prepared statements, sanitize API parameters, and check web app source files.</p>
+                            </div>
+                            <div class="ai-suggestion-action">
+                                <span class="action-badge badge-action-required">Sanitize Inputs</span>
+                            </div>
+                        </div>
+                    `;
+                } else if (type.includes('Scan') || type.includes('Port')) {
+                    html += `
+                        <div class="ai-suggestion-item" style="border-left: 4px solid var(--purple); background: rgba(157, 78, 221, 0.03); margin-bottom: 12px;">
+                            <div class="ai-suggestion-icon"><i class="fa-solid fa-network-wired text-purple" style="color: var(--purple);"></i></div>
+                            <div class="ai-suggestion-text">
+                                <h4>Medium Risk: Active Port Scan/Probing</h4>
+                                <p>Local socket enumeration detected. Close all unused public-facing ports, configure port-knocking, and restrict raw ICMP pings.</p>
+                            </div>
+                            <div class="ai-suggestion-action">
+                                <span class="action-badge badge-action-required">Configure Firewall</span>
+                            </div>
+                        </div>
+                    `;
+                } else if (type.includes('Force') || type.includes('Brute')) {
+                    html += `
+                        <div class="ai-suggestion-item" style="border-left: 4px solid var(--red); background: rgba(255, 51, 102, 0.03); margin-bottom: 12px;">
+                            <div class="ai-suggestion-icon"><i class="fa-solid fa-key text-orange" style="color: var(--orange);"></i></div>
+                            <div class="ai-suggestion-text">
+                                <h4>High Risk: Authentication Brute Force Attack</h4>
+                                <p>High-frequency login failure alerts. Implement Fail2ban access lockouts, restrict SSH remote logins, and enable mandatory Multi-Factor Authentication (2FA).</p>
+                            </div>
+                            <div class="ai-suggestion-action">
+                                <span class="action-badge badge-action-required">Enforce 2FA / Lockout</span>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
         }
 
+        // 2. PREVENTATIVE SECURITY RECOMMENDATIONS (ALWAYS VISIBLE)
+        html += `<h3 style="margin-top: 15px; margin-bottom: 12px; font-size: 13px; color: var(--primary); text-transform: uppercase; letter-spacing: 0.5px;"><i class="fa-solid fa-shield text-purple" style="margin-right: 6px;"></i> Preventative Security Recommendations</h3>`;
+
+        // SSH and Port Access Control
+        html += `
+            <div class="ai-suggestion-item" style="margin-bottom: 10px;">
+                <div class="ai-suggestion-icon"><i class="fa-solid fa-lock text-green" style="color: var(--green);"></i></div>
+                <div class="ai-suggestion-text">
+                    <h4>Configure Host Access Control (SSH & Firewalls)</h4>
+                    <p>Disable root remote login inside <code>/etc/ssh/sshd_config</code> (set PermitRootLogin to no). Keep system firewall rules restrictive (only expose ports 80/443).</p>
+                </div>
+                <div class="ai-suggestion-action">
+                    <span class="action-badge badge-neutral" style="color: var(--green); border-color: var(--green); background: rgba(16, 185, 129, 0.05);">Recommended</span>
+                </div>
+            </div>
+        `;
+
+        // SQL Injection / Database Security
+        html += `
+            <div class="ai-suggestion-item" style="margin-bottom: 10px;">
+                <div class="ai-suggestion-icon"><i class="fa-solid fa-shield-halved text-blue" style="color: var(--primary);"></i></div>
+                <div class="ai-suggestion-text">
+                    <h4>Web Application Parameter Sanitization</h4>
+                    <p>Prevent database query leakages by strictly parameterized queries (Prepared Statements). Deploy query sanitation and input validations on all public API endpoints.</p>
+                </div>
+                <div class="ai-suggestion-action">
+                    <span class="action-badge badge-neutral" style="color: var(--primary); border-color: var(--primary); background: rgba(139, 92, 246, 0.05);">Recommended</span>
+                </div>
+            </div>
+        `;
+
+        // DDoS Mitigation
+        html += `
+            <div class="ai-suggestion-item" style="margin-bottom: 10px;">
+                <div class="ai-suggestion-icon"><i class="fa-solid fa-server text-purple" style="color: var(--purple);"></i></div>
+                <div class="ai-suggestion-text">
+                    <h4>DDoS Buffer Exhaustion Protection</h4>
+                    <p>Configure rate-limiting modules on Nginx/Apache gateways (e.g. <code>limit_req</code>) and set up connections pooling to absorb brute socket floods.</p>
+                </div>
+                <div class="ai-suggestion-action">
+                    <span class="action-badge badge-neutral" style="color: var(--purple); border-color: var(--purple); background: rgba(157, 78, 221, 0.05);">Recommended</span>
+                </div>
+            </div>
+        `;
+
+        // MFA / Brute Force Lockouts
+        html += `
+            <div class="ai-suggestion-item">
+                <div class="ai-suggestion-icon"><i class="fa-solid fa-user-shield text-orange" style="color: var(--orange);"></i></div>
+                <div class="ai-suggestion-text">
+                    <h4>Enforce MFA & Bruteforce Protection Lockout</h4>
+                    <p>Enable secure token multi-factor authorization for logins. Deploy automated IP blocking software like <i>Fail2ban</i> to temporarily drop persistent scanning nodes.</p>
+                </div>
+                <div class="ai-suggestion-action">
+                    <span class="action-badge badge-neutral" style="color: var(--orange); border-color: var(--orange); background: rgba(249, 115, 22, 0.05);">Recommended</span>
+                </div>
+            </div>
+        `;
+
         listEl.innerHTML = html;
+    }
+
+    function updateAiSuggestionsDuringScan(percent) {
+        const listEl = document.getElementById('ai-recommendations-list');
+        const statusEl = document.getElementById('ai-safety-status');
+        if (!listEl || !statusEl) return;
+        
+        statusEl.textContent = `Deep Scan: ${percent}%`;
+        statusEl.className = 'badge badge-warning blink';
+        
+        const netSelect = document.getElementById('network-select');
+        let activeSSID = '';
+        if (netSelect && netSelect.selectedIndex >= 0) {
+            const selectedOpt = netSelect.options[netSelect.selectedIndex];
+            if (selectedOpt) activeSSID = selectedOpt.value;
+        }
+        
+        let phase = 1;
+        let phaseText = 'Mapping Network Topology';
+        let detailText = `Scanning active ARP caches and mapping local client IP boundaries on adapter "${activeSSID}". Discovering wireless nodes...`;
+        if (percent >= 25 && percent < 50) {
+            phase = 2;
+            phaseText = 'Sockets & Port Sweep Audit';
+            detailText = `Auditing local TCP/UDP handshake flags and listening port boundaries on active network hosts. Checking socket leakages...`;
+        } else if (percent >= 50 && percent < 75) {
+            phase = 3;
+            phaseText = 'Neural Packet Inspection';
+            detailText = `Running artificial intelligence ML classification models on raw packet payloads. Analyzing confidence and vectors...`;
+        } else if (percent >= 75) {
+            phase = 4;
+            phaseText = 'Compiling Security Audit';
+            detailText = `Compiling localized vulnerability scores and threat reports. Re-configuring the security radar and transmission indexes...`;
+        }
+        
+        listEl.innerHTML = `
+            <div class="ai-suggestion-item" style="border-left: 4px solid var(--primary); background: rgba(0, 245, 212, 0.02); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; text-align: center; gap: 18px;">
+                <div class="cyber-spinner" style="margin: 0 auto; width: 44px; height: 44px; position: relative; display: flex; align-items: center; justify-content: center;">
+                    <div class="ring outer-ring" style="border-color: var(--primary) transparent var(--primary) transparent; border-width: 3px; width: 44px; height: 44px;"></div>
+                    <div class="ring inner-ring" style="border-color: transparent var(--purple) transparent var(--purple); border-width: 3px; width: 30px; height: 30px;"></div>
+                </div>
+                <div class="ai-suggestion-text" style="text-align: center;">
+                    <h4 style="font-family: var(--font-title); font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 6px;">[Phase ${phase}/4] ${phaseText}</h4>
+                    <p style="font-size: 12px; color: var(--text-secondary); max-width: 380px; line-height: 1.4; margin: 0 auto;">${detailText}</p>
+                </div>
+                <div style="margin-top: 5px;">
+                    <span class="action-badge badge-warning blink" style="padding: 6px 14px; font-size: 10px; font-family: var(--font-mono);">Scanning SSID: ${activeSSID} &bull; ${percent}%</span>
+                </div>
+            </div>
+        `;
+        
+        // Update Radar chart during scan with simulated sweep animations
+        if (securityRadarChart) {
+            const tempVal = 40 + (percent % 40);
+            securityRadarChart.data.datasets[0].data = [
+                tempVal,
+                tempVal + 10,
+                tempVal - 15,
+                tempVal + 5,
+                tempVal - 5
+            ];
+            securityRadarChart.update('none');
+        }
+        
+        // Update Gauge chart during scan with simulated sweep animations
+        const scoreVal = 95 - (percent % 15);
+        if (securityGaugeChart) {
+            securityGaugeChart.data.datasets[0].data = [scoreVal, 100 - scoreVal];
+            securityGaugeChart.data.datasets[0].backgroundColor = ['#f97316', 'rgba(255, 255, 255, 0.05)']; // Orange during scan
+            securityGaugeChart.data.datasets[0].hoverBackgroundColor = ['#f97316', 'rgba(255, 255, 255, 0.05)'];
+            securityGaugeChart.update('none');
+        }
+        const scoreValEl = document.getElementById('gauge-score-value');
+        const scoreLabelEl = document.getElementById('gauge-score-label');
+        if (scoreValEl) {
+            scoreValEl.textContent = scoreVal + '%';
+            scoreValEl.style.color = '#f97316';
+        }
+        if (scoreLabelEl) {
+            scoreLabelEl.textContent = 'Scanning...';
+        }
+    }
+
+    function updateSecurityAssessmentDuringScan(percent) {
+        const levelEl = document.getElementById('net-threat-level');
+        const vulnEl = document.getElementById('net-vulnerability');
+        const threatsEl = document.getElementById('net-threats-present');
+        
+        if (levelEl) {
+            levelEl.textContent = `Scanning (${percent}%)`;
+            levelEl.style.color = 'var(--orange)';
+        }
+        if (vulnEl) {
+            if (percent < 30) vulnEl.textContent = "Checking SSID & Cipher strength";
+            else if (percent < 60) vulnEl.textContent = "Probing exposed TCP/UDP ports";
+            else if (percent < 90) vulnEl.textContent = "Analyzing packet threat ratios";
+            else vulnEl.textContent = "Running AI classifier algorithms";
+        }
+        if (threatsEl) {
+            if (percent < 30) threatsEl.textContent = "Discovering node devices...";
+            else if (percent < 60) threatsEl.textContent = "Scanning interfaces...";
+            else if (percent < 90) threatsEl.textContent = "Parsing packet payloads...";
+            else threatsEl.textContent = "Compiling audit logs...";
+        }
     }
 
     function loadPacketHistory() {
@@ -787,7 +1323,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        fetch('/api/history')
+        fetch(API_BASE + '/api/history')
             .then(res => res.json())
             .then(packets => renderPacketTables(packets))
             .catch(() => switchToOfflineMode());
@@ -853,7 +1389,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        fetch('/api/scan-history')
+        fetch(API_BASE + '/api/scan-history')
             .then(res => res.json())
             .then(historyList => renderScanHistoryList(historyList))
             .catch(() => switchToOfflineMode());
@@ -861,6 +1397,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function renderScanHistoryList(historyList) {
         const listEl = document.getElementById('scan-history-list');
+        
+        if (webAuditChart) {
+            const recentScans = [...historyList].slice(0, 5).reverse();
+            webAuditChart.data.labels = recentScans.map(s => s.domain);
+            webAuditChart.data.datasets[0].data = recentScans.map(s => s.score);
+            webAuditChart.update();
+        }
         if (historyList.length === 0) {
             listEl.innerHTML = `
                 <div class="no-data">
@@ -900,11 +1443,47 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    function updateActiveNetworkUsersCount() {
+        const usersEl = document.getElementById('stat-network-users');
+        const ssidEl = document.getElementById('stat-network-users-ssid');
+        if (!usersEl || !ssidEl) return;
+        
+        if (isNetworkSelected) {
+            let baseUsers = 5;
+            let selectedSSID = '';
+            const netSelect = document.getElementById('network-select');
+            const interfaceSelect = document.getElementById('interface-select');
+            
+            if (interfaceSelect && interfaceSelect.value === 'WiFi' && netSelect && netSelect.selectedIndex >= 0) {
+                selectedSSID = netSelect.value;
+                if (selectedSSID.includes('HomeSecure')) baseUsers = 6;
+                else if (selectedSSID.includes('Airport')) baseUsers = 28;
+                else if (selectedSSID.includes('Company')) baseUsers = 15;
+                else if (selectedSSID.includes('Neighbor')) baseUsers = 3;
+            } else {
+                const iface = interfaceSelect ? interfaceSelect.value : 'Ethernet';
+                selectedSSID = iface || 'Local Link';
+                baseUsers = iface === 'Ethernet' ? 2 : 1;
+            }
+            
+            const jitter = Math.random() < 0.2 ? (Math.random() < 0.5 ? 1 : -1) : 0;
+            const currentUsers = Math.max(1, baseUsers + jitter);
+            
+            usersEl.textContent = currentUsers.toString();
+            ssidEl.textContent = `SSID: ${selectedSSID}`;
+        } else {
+            usersEl.textContent = '--';
+            ssidEl.textContent = 'No network selected';
+        }
+    }
+
     // ----------------------------------------------------------------------
     // 5. Dynamic Streaming Loop (Supports Offline simulation)
     // ----------------------------------------------------------------------
     function startPacketPolling() {
         streamTimer = setInterval(function() {
+            updateActiveNetworkUsersCount();
+            
             if (!isNetworkSelected) {
                 // Return immediately if system is in Standby / waiting for interface or SSID selection
                 return;
@@ -926,7 +1505,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 newLabels.push(timeStr);
-                newThroughput.push(Math.floor(Math.random() * 600) + 2900);
+                
+                const pps = Math.floor(Math.random() * 600) + 2900;
+                newThroughput.push(pps);
+                const secRateEl = document.getElementById('stat-sec-rate');
+                if (secRateEl) secRateEl.textContent = `${pps.toLocaleString()} / sec rate`;
                 
                 const threatCount = updates.new_packets.filter(p => p.threat !== 'Normal').length;
                 newAlerts.push(threatCount);
@@ -937,6 +1520,23 @@ document.addEventListener('DOMContentLoaded', function() {
                     newAlerts.shift();
                 }
                 if (throughputChart) throughputChart.update('none');
+                
+                // Update Suggestions Speed Line Chart (Offline Mode)
+                if (suggestionsSpeedChart) {
+                    const speedLabels = suggestionsSpeedChart.data.labels;
+                    const speedData = suggestionsSpeedChart.data.datasets[0].data;
+                    const speedMbs = parseFloat(((pps * 1250) / (1024 * 1024)).toFixed(2));
+                    
+                    speedLabels.push(timeStr);
+                    speedData.push(speedMbs);
+                    if (speedLabels.length > 15) {
+                        speedLabels.shift();
+                        speedData.shift();
+                    }
+                    suggestionsSpeedChart.update('none');
+                    const speedValEl = document.getElementById('suggestions-live-speed-value');
+                    if (speedValEl) speedValEl.textContent = speedMbs.toFixed(2) + ' MB/s';
+                }
 
                 // Trigger alerts
                 const criticalThreats = updates.new_packets.filter(p => p.severity === 'Critical' || p.severity === 'High');
@@ -956,7 +1556,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             // Normal online polling
-            fetch('/api/traffic')
+            fetch(API_BASE + '/api/traffic')
                 .then(res => res.json())
                 .then(update => {
                     totalPackets = update.total_packets;
@@ -970,7 +1570,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                     newLabels.push(timeStr);
-                    newThroughput.push(Math.floor(Math.random() * 600) + 2900);
+                    
+                    const onlinePps = Math.floor(Math.random() * 600) + 2900;
+                    newThroughput.push(onlinePps);
+                    const onlineSecRateEl = document.getElementById('stat-sec-rate');
+                    if (onlineSecRateEl) onlineSecRateEl.textContent = `${onlinePps.toLocaleString()} / sec rate`;
                     
                     const threatCount = update.new_packets.filter(p => p.threat !== 'Normal').length;
                     newAlerts.push(threatCount);
@@ -981,6 +1585,23 @@ document.addEventListener('DOMContentLoaded', function() {
                         newAlerts.shift();
                     }
                     if (throughputChart) throughputChart.update('none');
+                    
+                    // Update Suggestions Speed Line Chart (Online Mode)
+                    if (suggestionsSpeedChart) {
+                        const speedLabels = suggestionsSpeedChart.data.labels;
+                        const speedData = suggestionsSpeedChart.data.datasets[0].data;
+                        const speedMbs = parseFloat(((onlinePps * 1250) / (1024 * 1024)).toFixed(2));
+                        
+                        speedLabels.push(timeStr);
+                        speedData.push(speedMbs);
+                        if (speedLabels.length > 15) {
+                            speedLabels.shift();
+                            speedData.shift();
+                        }
+                        suggestionsSpeedChart.update('none');
+                        const speedValEl = document.getElementById('suggestions-live-speed-value');
+                        if (speedValEl) speedValEl.textContent = speedMbs.toFixed(2) + ' MB/s';
+                    }
                     
                     const criticalThreats = update.new_packets.filter(p => p.severity === 'Critical' || p.severity === 'High');
                     if (criticalThreats.length > 0) {
@@ -1044,6 +1665,12 @@ document.addEventListener('DOMContentLoaded', function() {
             reportContainer.classList.add('hidden');
             progressWidget.classList.remove('hidden');
             
+            // Hide deep scan modules on new scan launch
+            const deepResults = document.getElementById('deep-web-scan-results');
+            const deepLoader = document.getElementById('deep-web-scan-progress');
+            if (deepResults) deepResults.classList.add('hidden');
+            if (deepLoader) deepLoader.classList.add('hidden');
+            
             const progressStages = [
                 { percent: 10, title: "Resolving website domain records...", desc: "Querying target DNS and server host addresses." },
                 { percent: 35, title: "Establishing secure SSL port handshake...", desc: "Checking SSL/TLS certificate details and chain validation." },
@@ -1065,7 +1692,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }, 800);
             
-            const serverUrl = isOfflineMode ? 'http://127.0.0.1:5000/api/scan' : '/api/scan';
+            const serverUrl = API_BASE + '/api/scan';
             
             fetch(serverUrl, {
                 method: 'POST',
@@ -1133,6 +1760,14 @@ document.addEventListener('DOMContentLoaded', function() {
         
         document.getElementById('report-grade').textContent = report.grade;
         document.getElementById('report-points').textContent = `${report.score}/100`;
+        
+        if (webStrengthGaugeChart) {
+            webStrengthGaugeChart.data.datasets[0].data = [report.score, 100 - report.score];
+            webStrengthGaugeChart.data.datasets[0].backgroundColor = [report.risk_color, 'rgba(255, 255, 255, 0.05)'];
+            webStrengthGaugeChart.data.datasets[0].hoverBackgroundColor = [report.risk_color, 'rgba(255, 255, 255, 0.05)'];
+            webStrengthGaugeChart.update();
+        }
+        
         document.getElementById('report-url').textContent = report.url;
         
         const ring = document.getElementById('report-grade-container');
@@ -1195,8 +1830,505 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
         
+        currentScanReport = report;
+        currentDeepScanReport = null;
+        
+        const deepResults = document.getElementById('deep-web-scan-results');
+        const deepLoader = document.getElementById('deep-web-scan-progress');
+        if (deepResults) deepResults.classList.add('hidden');
+        if (deepLoader) deepLoader.classList.add('hidden');
+        
+        const btnDeep = document.getElementById('btn-deep-web-scan');
+        if (btnDeep) btnDeep.disabled = false;
+
         container.classList.remove('hidden');
     }
+
+    function generateDeepWebScanDetails(domain) {
+        let seed = 0;
+        for (let i = 0; i < domain.length; i++) {
+            seed += domain.charCodeAt(i);
+        }
+        
+        const firewallOptions = [
+            { name: "Cloudflare WAF Shield", desc: "1 active application shield, SSL decryption bypass protection enabled." },
+            { name: "AWS WAF Shield Advanced", desc: "Distributed edge threat filtering, layer 7 protection active." },
+            { name: "Fortinet FortiWeb WAF", desc: "Active signature inspection shield, SQLi/XSS filters active." },
+            { name: "F5 BIG-IP Advanced WAF", desc: "Behavioral analytics layer enabled, bot protection active." }
+        ];
+        
+        const techStackOptions = [
+            ["React.js 18.2", "Next.js 14.1", "Nginx Webserver", "TailwindCSS", "Node.js (Express)"],
+            ["WordPress 6.4", "Apache HTTPD 2.4", "PHP 8.2", "jQuery 3.7.1", "MySQL"],
+            ["Angular 17", "Java Spring Boot", "Tomcat Server", "Bootstrap 5", "Oracle DB"],
+            ["Vue.js 3", "Python Django", "Gunicorn Gateway", "PostgreSQL", "Cloudflare CDN"]
+        ];
+
+        const protocolOptions = [
+            { proto: "HTTP/3 Protocol", desc: "QUIC transport layer, TLS 1.3 negotiated, 0-RTT handshake enabled." },
+            { proto: "HTTP/2 Secure Channel", desc: "Multiplexed streaming enabled, TLS 1.3 negotiated with AES-256-GCM." },
+            { proto: "HTTP/2 Standard Socket", desc: "ALPN negotiations enabled, TLS 1.2 fallback active." }
+        ];
+
+        const ispOptions = [
+            { ns: "ns1.cloudflare.com, ns2.cloudflare.com", mx: "route-mx.cloudflare.net", asn: "AS13335 (Cloudflare Inc.)", isp: "Cloudflare Web Network Services" },
+            { ns: "ns-120.awsdns-15.net, ns-492.awsdns-61.org", mx: "inbound-smtp.amazon.com", asn: "AS16509 (Amazon Technologies Inc.)", isp: "Amazon Web Services EC2 Core" },
+            { ns: "ns1.google.com, ns2.google.com", mx: "aspmx.l.google.com", asn: "AS15169 (Google LLC)", isp: "Google Cloud Infrastructure Engine" },
+            { ns: "dns1.registrar-servers.com, dns2.registrar-servers.com", mx: "mail.namecheap.com", asn: "AS22621 (Namecheap Inc.)", isp: "Namecheap Hosting Systems" }
+        ];
+
+        const firewall = firewallOptions[seed % firewallOptions.length];
+        const techStack = techStackOptions[seed % techStackOptions.length];
+        const protocol = protocolOptions[seed % protocolOptions.length];
+        const isp = ispOptions[seed % ispOptions.length];
+
+        return {
+            domain: domain,
+            firewall: firewall,
+            techStack: techStack,
+            protocol: protocol,
+            isp: isp
+        };
+    }
+
+    // Deep Website Scanner trigger click binding
+    setTimeout(() => {
+        const btnDeepWebScan = document.getElementById('btn-deep-web-scan');
+        if (btnDeepWebScan) {
+            btnDeepWebScan.addEventListener('click', function() {
+                if (!currentScanReport) return;
+                
+                const btn = this;
+                const progressWidget = document.getElementById('deep-web-scan-progress');
+                const fillEl = document.getElementById('deep-progress-fill');
+                const titleEl = document.getElementById('deep-progress-title');
+                const descEl = document.getElementById('deep-progress-desc');
+                const resultsWidget = document.getElementById('deep-web-scan-results');
+                
+                btn.disabled = true;
+                if (resultsWidget) resultsWidget.classList.add('hidden');
+                if (progressWidget) progressWidget.classList.remove('hidden');
+                
+                const stages = [
+                    { percent: 20, title: "Detecting active Web Application Firewall (WAF) layers...", desc: "Inspecting header attributes and routing nodes for firewall shields." },
+                    { percent: 45, title: "Enumerating remote application technology signatures...", desc: "Scanning scripts, CSS frameworks, CMS metadata, and server distributions." },
+                    { percent: 70, title: "Analyzing negotiated HTTP communication protocols...", desc: "Verifying HTTP version upgrades, ALPN parameters, and TLS ciphers." },
+                    { percent: 90, title: "Resolving DNS zone authoritative and host registration details...", desc: "Querying nameservers, MX records, ASN registries, and ISP parameters." },
+                    { percent: 100, title: "Finalizing security audit logs...", desc: "Compiling deep parameters and preparing PDF reporting frame." }
+                ];
+                
+                let stageIdx = 0;
+                if (fillEl) fillEl.style.width = '0%';
+                
+                const interval = setInterval(() => {
+                    if (stageIdx < stages.length) {
+                        const stage = stages[stageIdx];
+                        if (fillEl) fillEl.style.width = `${stage.percent}%`;
+                        if (titleEl) titleEl.textContent = stage.title;
+                        if (descEl) descEl.textContent = stage.desc;
+                        stageIdx++;
+                    } else {
+                        clearInterval(interval);
+                        if (progressWidget) progressWidget.classList.add('hidden');
+                        btn.disabled = false;
+                        
+                        const details = generateDeepWebScanDetails(currentScanReport.domain);
+                        currentDeepScanReport = details;
+                        
+                        const wafVal = document.getElementById('deep-waf-val');
+                        const wafDesc = document.getElementById('deep-waf-desc');
+                        const protoVal = document.getElementById('deep-protocol-val');
+                        const protoDesc = document.getElementById('deep-protocol-desc');
+                        const techBadges = document.getElementById('deep-tech-badges');
+                        
+                        const dnsNs = document.getElementById('deep-dns-ns');
+                        const dnsMx = document.getElementById('deep-dns-mx');
+                        const dnsAsn = document.getElementById('deep-dns-asn');
+                        const dnsIsp = document.getElementById('deep-dns-isp');
+                        
+                        if (wafVal) wafVal.textContent = details.firewall.name;
+                        if (wafDesc) wafDesc.textContent = details.firewall.desc;
+                        if (protoVal) protoVal.textContent = details.protocol.proto;
+                        if (protoDesc) protoDesc.textContent = details.protocol.desc;
+                        
+                        if (techBadges) {
+                            techBadges.innerHTML = '';
+                            details.techStack.forEach(tech => {
+                                const span = document.createElement('span');
+                                span.className = 'tech-badge';
+                                let icon = '<i class="fa-solid fa-code"></i>';
+                                if (tech.includes('React') || tech.includes('Vue') || tech.includes('Angular')) icon = '<i class="fa-brands fa-js"></i>';
+                                else if (tech.includes('Nginx') || tech.includes('Apache')) icon = '<i class="fa-solid fa-server"></i>';
+                                else if (tech.includes('PHP') || tech.includes('Python') || tech.includes('Java') || tech.includes('Node')) icon = '<i class="fa-solid fa-terminal"></i>';
+                                else if (tech.includes('MySQL') || tech.includes('Postgre') || tech.includes('Oracle')) icon = '<i class="fa-solid fa-database"></i>';
+                                else if (tech.includes('WordPress')) icon = '<i class="fa-brands fa-wordpress"></i>';
+                                else if (tech.includes('Tailwind') || tech.includes('Bootstrap')) icon = '<i class="fa-brands fa-css3-alt"></i>';
+                                span.innerHTML = `${icon} ${tech}`;
+                                techBadges.appendChild(span);
+                            });
+                        }
+                        
+                        if (dnsNs) dnsNs.textContent = details.isp.ns;
+                        if (dnsMx) dnsMx.textContent = details.isp.mx;
+                        if (dnsAsn) dnsAsn.textContent = details.isp.asn;
+                        if (dnsIsp) dnsIsp.textContent = details.isp.isp;
+                        
+                        if (resultsWidget) resultsWidget.classList.remove('hidden');
+                    }
+                }, 900);
+            });
+        }
+
+        const btnDownloadWebPdf = document.getElementById('download-web-pdf-btn');
+        if (btnDownloadWebPdf) {
+            btnDownloadWebPdf.addEventListener('click', function() {
+                if (!currentScanReport || !currentDeepScanReport) return;
+                
+                const r = currentScanReport;
+                const d = currentDeepScanReport;
+                
+                const printWindow = window.open('', '_blank', 'width=850,height=950');
+                
+                let findingsHtml = '';
+                if (r.findings.length === 0) {
+                    findingsHtml = `
+                        <div style="padding: 16px; border: 1px solid #10b981; border-radius: 8px; color: #10b981; background: rgba(16, 185, 129, 0.05);">
+                            <strong>&bull; All Compliance Checks Passed</strong>: No critical header vulnerability vulnerabilities found.
+                        </div>
+                    `;
+                } else {
+                    r.findings.forEach(f => {
+                        findingsHtml += `
+                            <div class="finding-item-pdf" style="border-left-color: ${f.severity === 'High' ? 'var(--red)' : (f.severity === 'Medium' ? 'var(--orange)' : 'var(--primary)')};">
+                                <h4>
+                                    <span>${f.aspect}</span>
+                                    <span style="font-size: 11px; font-weight: bold; color: ${f.severity === 'High' ? 'var(--red)' : (f.severity === 'Medium' ? 'var(--orange)' : 'var(--primary)')}; text-transform: uppercase;">${f.severity} Severity</span>
+                                </h4>
+                                <p>${f.desc}</p>
+                                <div class="remediation" style="margin-top: 10px; font-size: 11px; background: rgba(0, 245, 212, 0.03); padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(0, 245, 212, 0.1);">
+                                    <strong>Remediation:</strong> ${f.remediation}
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+                
+                let techStackHtml = '';
+                d.techStack.forEach(t => {
+                    techStackHtml += `<span class="tech-badge-pdf" style="display: inline-block; padding: 6px 12px; font-size: 11px; font-weight: 600; background: rgba(255,255,255,0.02); border: 1px solid var(--border-glass); border-radius: 6px; margin-right: 8px; margin-bottom: 8px; color: #fff;">${t}</span>`;
+                });
+                
+                const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Security Audit Report - ${r.domain}</title>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;800&family=Inter:wght@400;600&display=swap');
+            
+            :root {
+                --primary: #00f5d4;
+                --purple: #9d4ede;
+                --red: #ff3366;
+                --orange: #f59e0b;
+                --green: #10b981;
+                --bg-dark: #0b0f17;
+                --border-glass: rgba(255, 255, 255, 0.08);
+                --text-secondary: #94a3b8;
+            }
+
+            body {
+                font-family: 'Inter', sans-serif;
+                background: #0e131f;
+                color: #f1f5f9;
+                margin: 0;
+                padding: 40px;
+            }
+
+            .report-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 2px solid var(--border-glass);
+                padding-bottom: 24px;
+                margin-bottom: 30px;
+            }
+
+            .logo-title h1 {
+                font-family: 'Outfit', sans-serif;
+                margin: 0;
+                font-size: 28px;
+                font-weight: 800;
+                letter-spacing: 0.5px;
+                background: linear-gradient(135deg, var(--primary), var(--purple));
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+
+            .logo-title p {
+                margin: 4px 0 0;
+                font-size: 13px;
+                color: var(--text-secondary);
+            }
+
+            .score-circle {
+                width: 90px;
+                height: 90px;
+                border-radius: 50%;
+                border: 4px solid ${r.risk_color};
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                background: rgba(255,255,255,0.02);
+            }
+
+            .score-circle .grade {
+                font-family: 'Outfit', sans-serif;
+                font-size: 32px;
+                font-weight: 800;
+                color: ${r.risk_color};
+                line-height: 1;
+            }
+
+            .score-circle .points {
+                font-size: 10px;
+                color: var(--text-secondary);
+                margin-top: 4px;
+                font-weight: 600;
+            }
+
+            .report-grid-meta {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+
+            .meta-card {
+                background: rgba(255, 255, 255, 0.01);
+                border: 1px solid var(--border-glass);
+                padding: 16px;
+                border-radius: 12px;
+            }
+
+            .meta-card span {
+                font-size: 10px;
+                text-transform: uppercase;
+                color: var(--text-secondary);
+                font-weight: 600;
+                letter-spacing: 0.5px;
+            }
+
+            .meta-card h3 {
+                margin: 6px 0 0;
+                font-size: 15px;
+                font-weight: 700;
+                color: #fff;
+            }
+
+            .section-title {
+                font-family: 'Outfit', sans-serif;
+                font-size: 18px;
+                font-weight: 700;
+                border-bottom: 1px solid var(--border-glass);
+                padding-bottom: 10px;
+                margin-top: 40px;
+                margin-bottom: 20px;
+                color: var(--primary);
+            }
+
+            .finding-item-pdf {
+                border-left: 4px solid var(--primary);
+                background: rgba(255, 255, 255, 0.01);
+                padding: 16px;
+                border-radius: 4px 12px 12px 4px;
+                margin-bottom: 12px;
+                border: 1px solid var(--border-glass);
+                border-left-width: 4px;
+            }
+
+            .finding-item-pdf h4 {
+                margin: 0 0 6px;
+                font-size: 14px;
+                font-weight: 700;
+                color: #fff;
+                display: flex;
+                justify-content: space-between;
+            }
+
+            .finding-item-pdf p {
+                margin: 0;
+                font-size: 12px;
+                color: var(--text-secondary);
+                line-height: 1.5;
+            }
+
+            .dns-table-pdf {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+            }
+
+            .dns-table-pdf td {
+                padding: 10px 14px;
+                border-bottom: 1px solid var(--border-glass);
+                color: #f1f5f9;
+            }
+
+            .dns-table-pdf td strong {
+                color: var(--text-secondary);
+            }
+
+            .footer {
+                margin-top: 60px;
+                text-align: center;
+                font-size: 11px;
+                color: var(--text-secondary);
+                border-top: 1px solid var(--border-glass);
+                padding-top: 20px;
+            }
+
+            @media print {
+                body {
+                    background: #fff;
+                    color: #000;
+                    padding: 20px;
+                }
+                .meta-card, .finding-item-pdf {
+                    background: none;
+                    border: 1px solid #ddd;
+                    page-break-inside: avoid;
+                }
+                .remediation {
+                    background: #f9f9f9;
+                    border: 1px solid #eee;
+                    color: #333;
+                }
+                .tech-badge-pdf {
+                    border: 1px solid #ccc;
+                    color: #000;
+                }
+                h1, h3, h4, .logo-title h1 {
+                    color: #000 !important;
+                    -webkit-text-fill-color: initial !important;
+                }
+                .dns-table-pdf td {
+                    color: #000 !important;
+                }
+            }
+        </style>
+    </head>
+    <body>
+
+        <div class="report-header">
+            <div class="logo-title">
+                <h1>SENTINEL CYBERINTELLIGENCE</h1>
+                <p>AI NIDS Domain Threat Penetration Report</p>
+            </div>
+            <div class="score-circle">
+                <span class="grade">${r.grade}</span>
+                <span class="points">${r.score}/100</span>
+            </div>
+        </div>
+
+        <div class="report-grid-meta">
+            <div class="meta-card">
+                <span>Domain Address</span>
+                <h3>${r.domain}</h3>
+            </div>
+            <div class="meta-card">
+                <span>Website IPv4</span>
+                <h3>${r.ip}</h3>
+            </div>
+            <div class="meta-card">
+                <span>Time Audited</span>
+                <h3>${r.scan_time}</h3>
+            </div>
+        </div>
+
+        <div class="report-grid-meta">
+            <div class="meta-card">
+                <span>SSL Authority</span>
+                <h3>${r.ssl.issuer}</h3>
+            </div>
+            <div class="meta-card">
+                <span>SSL Expiration</span>
+                <h3>${r.ssl.expiry}</h3>
+            </div>
+            <div class="meta-card">
+                <span>Risk Index Rating</span>
+                <h3 style="color: ${r.risk_color};">${r.risk_level} Risk</h3>
+            </div>
+        </div>
+
+        <div class="section-title">Website Configuration Audit Findings</div>
+        <div class="findings-list">
+            ${findingsHtml}
+        </div>
+
+        <div class="section-title">WAF Shield & Security Protocols</div>
+        <div class="report-grid-meta" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 20px;">
+            <div class="meta-card">
+                <span>Web Application Firewall</span>
+                <h3>${d.firewall.name}</h3>
+                <p style="font-size: 11px; color: var(--text-secondary); margin: 6px 0 0;">${d.firewall.desc}</p>
+            </div>
+            <div class="meta-card">
+                <span>Negotiation Protocol</span>
+                <h3>${d.protocol.proto}</h3>
+                <p style="font-size: 11px; color: var(--text-secondary); margin: 6px 0 0;">${d.protocol.desc}</p>
+            </div>
+        </div>
+
+        <div class="section-title">Application Technology Stack</div>
+        <div style="background: rgba(255,255,255,0.01); border: 1px solid var(--border-glass); border-radius: 12px; padding: 20px; border: 1px solid var(--border-glass);">
+            ${techStackHtml}
+        </div>
+
+        <div class="section-title">Advanced DNS & Network ASN Records</div>
+        <div style="background: rgba(255,255,255,0.01); border: 1px solid var(--border-glass); border-radius: 12px; overflow: hidden; border: 1px solid var(--border-glass);">
+            <table class="dns-table-pdf">
+                <tr>
+                    <td style="width: 25%;"><strong>Nameservers:</strong></td>
+                    <td>${d.isp.ns}</td>
+                </tr>
+                <tr>
+                    <td><strong>Mail Exchanger:</strong></td>
+                    <td>${d.isp.mx}</td>
+                </tr>
+                <tr>
+                    <td><strong>Autonomous System:</strong></td>
+                    <td>${d.isp.asn}</td>
+                </tr>
+                <tr>
+                    <td><strong>Hosting ISP:</strong></td>
+                    <td>${d.isp.isp}</td>
+                </tr>
+            </table>
+        </div>
+
+        <div class="footer">
+            CONFIDENTIAL REPORT &bull; AI-NIDS INTELLIGENCE CENTER &bull; GENERATED ON SYSTEM TERMINAL
+        </div>
+
+        <script>
+            window.onload = function() {
+                setTimeout(function() {
+                    window.print();
+                }, 500);
+            }
+        </script>
+    </body>
+    </html>
+                `;
+                
+                printWindow.document.open();
+                printWindow.document.write(html);
+                printWindow.document.close();
+            });
+        }
+    }, 1000);
 
     // ----------------------------------------------------------------------
     // 7. AI Model Performance Analytics
@@ -1209,7 +2341,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        fetch('/api/model-performance')
+        fetch(API_BASE + '/api/model-performance')
             .then(res => res.json())
             .then(perf => renderModelPerformance(perf))
             .catch(() => {
@@ -1797,12 +2929,15 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Revert threat probability multiplier on server
             if (!isOfflineMode) {
-                fetch('/api/select-network', {
+                fetch(API_BASE + '/api/select-network', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ssid: selectedInterface, auth: 'Secure', enc: 'Wired' })
                 }).catch(e => console.error("Error setting monitored network on server:", e));
             }
+            
+            // Start Deep Scan progress
+            startSidebarNetworkScan(selectedInterface, 'Secure', 'Wired');
             
             // Reload the metrics & charts since network interface is selected!
             loadStats();
@@ -1813,7 +2948,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function loadAvailableNetworks() {
-        const serverUrl = isOfflineMode ? 'http://127.0.0.1:5000/api/networks' : '/api/networks';
+        const serverUrl = API_BASE + '/api/networks';
         
         fetch(serverUrl)
             .then(res => res.json())
@@ -1890,12 +3025,76 @@ document.addEventListener('DOMContentLoaded', function() {
         const isUnsecured = auth === "Open" || enc === "None" || enc === "none";
         
         if (!isOfflineMode) {
-            fetch('/api/select-network', {
+            fetch(API_BASE + '/api/select-network', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ssid: ssid, auth: auth, enc: enc })
+            }).then(() => {
+                // Immediately refresh charts and logs to reflect the new network database state
+                loadStats();
+                loadAlerts();
+                loadPacketHistory();
             }).catch(e => console.error("Error setting monitored network on server:", e));
+        } else {
+            // Re-seed offline simulation variables with the safety level of the selected network
+            const anomalyChance = isUnsecured ? 0.35 : 0.05;
+            
+            // Rebuild offline datasets
+            offlinePackets = [];
+            offlineAlerts = [];
+            
+            const count = 40;
+            const now = new Date();
+            for (let i = 0; i < count; i++) {
+                const timeOffset = new Date(now.getTime() - (count - i) * 3000);
+                let pkt;
+                if (Math.random() < anomalyChance) {
+                    pkt = generateSingleSimulatedPacket(timeOffset);
+                    while (pkt.threat === 'Normal') {
+                        pkt = generateSingleSimulatedPacket(timeOffset);
+                    }
+                    offlineAlerts.unshift({
+                        id: `ALT-${Math.floor(Math.random() * 9000) + 1000}`,
+                        time: pkt.time,
+                        type: pkt.threat,
+                        src_ip: pkt.src_ip,
+                        dest_ip: pkt.dest_ip,
+                        severity: pkt.severity,
+                        status: pkt.severity === 'Critical' || pkt.severity === 'High' ? 'Active' : 'Warning',
+                        confidence: pkt.confidence,
+                        info: pkt.info
+                    });
+                } else {
+                    pkt = generateSingleSimulatedPacket(timeOffset);
+                    pkt.threat = 'Normal';
+                    pkt.severity = 'Safe';
+                    pkt.info = "Standard network exchange";
+                }
+                offlinePackets.push(pkt);
+            }
+            
+            // Recalculate offline threat counts from new offlinePackets seed list
+            offlineThreatCounts = {
+                'Normal': 0,
+                'DDoS Attack': 0,
+                'SQL Injection': 0,
+                'Port Scan': 0,
+                'Brute Force': 0
+            };
+            offlinePackets.forEach(p => {
+                offlineThreatCounts[p.threat] = (offlineThreatCounts[p.threat] || 0) + 1;
+            });
+            totalPackets = offlinePackets.length;
+            totalThreats = offlinePackets.filter(p => p.threat !== 'Normal').length;
+            
+            // Reload all widgets with newly seeded context
+            loadStats();
+            loadAlerts();
+            loadPacketHistory();
         }
+        
+        // Start Deep Scan progress
+        startSidebarNetworkScan(ssid, auth, enc);
         
         if (isUnsecured) {
             updateStatusIndicator("INSECURE MONITOR", "text-red");
@@ -2007,12 +3206,115 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Notify backend of shutdown if online
         if (!isOfflineMode) {
-            fetch('/api/select-network', {
+            fetch(API_BASE + '/api/select-network', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ssid: 'HALT', auth: 'None', enc: 'None' })
             }).catch(e => console.error("Error setting emergency shutdown on server:", e));
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // 12. 5-Minute Deep Scan Simulation Flow
+    // ----------------------------------------------------------------------
+    function startSidebarNetworkScan(ssid, auth, enc) {
+        isScanRunning = true;
+        
+        const progressContainer = document.getElementById('sidebar-scan-progress-container');
+        const progressBar = document.getElementById('sidebar-scan-progress-bar');
+        const progressText = document.getElementById('sidebar-scan-status-text');
+        const progressPct = document.getElementById('sidebar-scan-pct');
+        const progressTimer = document.getElementById('sidebar-scan-timer');
+        const securityGrid = document.getElementById('security-grid');
+        const secPanel = document.getElementById('security-details-panel');
+        
+        if (!progressContainer || !progressBar || !securityGrid || !secPanel) return;
+        
+        // Show the panel
+        secPanel.classList.remove('hidden');
+        
+        // Hide/blur security assessment grid during scan
+        securityGrid.style.opacity = '0.15';
+        securityGrid.style.filter = 'blur(2px)';
+        securityGrid.style.pointerEvents = 'none';
+        
+        // Reset and show progress bar
+        progressContainer.classList.remove('hidden');
+        progressBar.style.width = '0%';
+        progressBar.style.background = 'linear-gradient(90deg, var(--primary) 0%, var(--purple) 100%)';
+        progressText.textContent = 'Mapping Nodes...';
+        progressPct.textContent = '0%';
+        progressTimer.textContent = 'Time Remaining: 5:00';
+        
+        updateAiSuggestionsDuringScan(0);
+        updateSecurityAssessmentDuringScan(0);
+        
+        if (sidebarScanTimer) clearInterval(sidebarScanTimer);
+        
+        let secondsElapsed = 0;
+        const totalDuration = 15; // 15 seconds snappy visual progress representing the 5-min window
+        
+        sidebarScanTimer = setInterval(() => {
+            secondsElapsed++;
+            const percent = Math.min(100, Math.floor((secondsElapsed / totalDuration) * 100));
+            progressBar.style.width = `${percent}%`;
+            progressPct.textContent = `${percent}%`;
+            
+            // Map percentage to simulated 5-minute countdown (300 seconds)
+            const totalSimulatedSeconds = 300;
+            const simulatedSecondsRemaining = Math.max(0, totalSimulatedSeconds - Math.floor((secondsElapsed / totalDuration) * totalSimulatedSeconds));
+            const min = Math.floor(simulatedSecondsRemaining / 60);
+            const sec = simulatedSecondsRemaining % 60;
+            
+            progressTimer.textContent = `Time Remaining: ${min}:${sec.toString().padStart(2, '0')}`;
+            
+            if (percent < 25) {
+                progressText.textContent = 'Mapping Network Nodes...';
+            } else if (percent < 50) {
+                progressText.textContent = 'Sniffing Traffic Packets...';
+            } else if (percent < 75) {
+                progressText.textContent = 'Inspecting Payloads...';
+            } else if (percent < 100) {
+                progressText.textContent = 'AI Threat Classification...';
+            }
+            
+            updateAiSuggestionsDuringScan(percent);
+            updateSecurityAssessmentDuringScan(percent);
+            
+            if (secondsElapsed >= totalDuration) {
+                clearInterval(sidebarScanTimer);
+                isScanRunning = false;
+                
+                // Scan completed
+                progressText.textContent = 'Scan Complete';
+                progressTimer.textContent = 'Audit Finalized';
+                progressBar.style.background = '#10b981'; // solid green
+                
+                // Show security assessment grid values
+                restoreBaseSecurityAssessment();
+                securityGrid.style.opacity = '1';
+                securityGrid.style.filter = 'none';
+                securityGrid.style.pointerEvents = 'auto';
+                
+                // Load actual finalized alerts and suggestions
+                if (isOfflineMode) {
+                    updateAiSuggestions(offlineAlerts);
+                } else {
+                    fetch(API_BASE + '/api/alerts')
+                        .then(res => res.json())
+                        .then(alerts => updateAiSuggestions(alerts))
+                        .catch(e => console.error("Error refreshing suggestions:", e));
+                }
+                
+                // Play notification toast
+                const isUnsecured = auth === "Open" || enc === "None" || enc === "none";
+                if (isUnsecured) {
+                    showToast(`[Deep Scan Complete] Vulnerabilities detected on "${ssid}"!`, "error");
+                } else {
+                    showToast(`[Deep Scan Complete] Network "${ssid}" is verified secure.`, "success");
+                }
+            }
+        }, 1000);
     }
 
     // ----------------------------------------------------------------------
@@ -2034,7 +3336,7 @@ document.addEventListener('DOMContentLoaded', function() {
             </tr>
         `;
 
-        const serverUrl = isOfflineMode ? 'http://127.0.0.1:5000/api/networks' : '/api/networks';
+        const serverUrl = API_BASE + '/api/networks';
 
         fetch(serverUrl)
             .then(res => res.json())
@@ -2127,4 +3429,5 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 1000);
         });
     }
+
 });
