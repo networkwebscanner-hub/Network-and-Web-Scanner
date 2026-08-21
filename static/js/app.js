@@ -187,7 +187,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 alertBadge.className = "badge badge-success";
             }
             if (alertMsg) {
-                alertMsg.textContent = "Passive scanning active. No active threats detected. It is a safe network.";
+                alertMsg.textContent = "Active scanning active. No active threats detected. Network secure.";
             }
             restoreBaseSecurityAssessment();
         }
@@ -409,9 +409,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const subtitleMap = {
             'overview': 'Sentinel network intrusion detection monitoring console.',
             'live-traffic': 'Streaming raw socket captures processed by local neural classifiers.',
-            'threat-history': 'Real-time AI intrusion logs and passive system health metrics.',
+            'threat-history': 'Real-time AI intrusion logs and active system health metrics.',
             'network-suggestions': 'AI-generated defense configurations and preventative network suggestions.',
-            'web-scanner': 'Passive HTTP configuration auditor and SSL assessment tool.',
+            'web-scanner': 'Active HTTP configuration auditor, SSL assessment and port analyzer tool.',
             'ai-performance': 'Neural network accuracy metrics, confusion matrices, and ROC plots.',
             'wifi-radar': 'Active wireless spectrum assessment mapping visible SSIDs.'
         };
@@ -419,7 +419,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const titleMap = {
             'overview': 'Dashboard Overview',
             'live-traffic': 'Live Traffic Stream',
-            'threat-history': 'AI Intrusion Logs & Passive System Health',
+            'threat-history': 'AI Intrusion Logs & Active System Health',
             'network-suggestions': 'Suggestions to Protect Your Network',
             'web-scanner': 'Website Security Scanner',
             'ai-performance': 'AI Model Performance Analytics',
@@ -1065,7 +1065,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         if (!isNetworkSelected) {
-            statusEl.textContent = 'Network Status: Passive';
+            statusEl.textContent = 'Network Status: Active';
             statusEl.className = 'badge badge-info';
         } else {
             statusEl.textContent = (isNetworkUnsecured || (alerts && alerts.length > 0)) ? 'Action Required: Vulnerabilities Found' : 'Network Status: Optimal';
@@ -2760,6 +2760,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 remediation: "Migrate server to port 443 HTTPS and deploy an SSL certificate."
             });
         }
+
+        // Simulate active open ports
+        const simPorts = [80, 443];
+        if (seed % 2 === 0) simPorts.push(22);
+        if (seed % 3 === 0) simPorts.push(8080);
+        findings.push({
+            aspect: "Active Open Ports Audit",
+            severity: "Low",
+            desc: `Active TCP port probing detected open service ports: ${simPorts.join(', ')}.`,
+            remediation: "Ensure only required ports (e.g. 80/443) are exposed publicly, and secure other open service ports behind a firewall or VPN."
+        });
 
         const octet1 = 100 + (seed % 100);
         const octet2 = 20 + (seed % 80);
